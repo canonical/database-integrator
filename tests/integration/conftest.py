@@ -2,10 +2,23 @@
 # Copyright 2022 Canonical Ltd.
 # See LICENSE file for licensing details.
 
+import logging
+import socket
 from pathlib import Path
 
+import boto3
+import boto3.session
 import pytest
+import pytest_microceph
+from botocore.client import Config
 from pytest_operator.plugin import OpsTest
+
+TEST_BUCKET_NAME = "kyuubi-test"
+TEST_PATH_NAME = "spark-events/"
+HOST_IP = socket.gethostbyname(socket.gethostname())
+
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.fixture(scope="module")
@@ -40,3 +53,37 @@ async def cloud_name(ops_test: OpsTest, request):
             pytest.skip("Does not run on vm")
             return
         return "localhost"
+
+
+@pytest.fixture(scope="module")
+def s3_bucket_and_creds(ops_test: OpsTest, microceph: pytest_microceph.ConnectionInformation):
+    if ops_test.model.info.provider_type != "kubernetes":
+        yield None
+        return
+
+    endpoint_url = f"http://{HOST_IP}"
+    access_key = microceph.access_key_id
+    secret_key = microceph.secret_access_key
+    bucket_name = microceph.bucket
+
+    session = boto3.session.Session(aws_access_key_id=access_key, aws_secret_access_key=secret_key)
+    s3 = session.resource(
+        service_name="s3",
+        endpoint_url=endpoint_url,
+        verify=False,
+        config=Config(connect_timeout=60, retries={"max_attempts": 4}),
+    )
+    test_bucket = s3.Bucket(bucket_name)
+    test_bucket.put_object(Key=TEST_PATH_NAME)
+
+    yield {
+        "endpoint": endpoint_url,
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "bucket": bucket_name,
+        "path": TEST_PATH_NAME,
+    }
+
+    logger.info("Tearing down test bucket...")
+    test_bucket.objects.all().delete()
+    test_bucket.delete()
